@@ -37,6 +37,10 @@ env/
 playwright-report/
 test-results/
 
+# --- Claude Code ---
+.claude/
+CLAUDE.md
+
 # --- IDE / редакторы ---
 .vscode/
 .idea/
