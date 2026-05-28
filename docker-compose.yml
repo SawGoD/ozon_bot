@@ -1,0 +1,15 @@
+services:
+  ozon-bot:
+    build: .
+    container_name: ozon-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: Europe/Moscow
+    volumes:
+      - ./data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
