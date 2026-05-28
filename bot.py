@@ -229,13 +229,20 @@ TRACK_ID_RE = re.compile(r"\b(\d{6,}-\d{2,}-\d+)\b")
 _sema = asyncio.Semaphore(CONCURRENCY)
 
 
+FETCH_HARD_TIMEOUT_SEC = int(os.environ.get("FETCH_HARD_TIMEOUT_SEC", "180"))
+
+
 async def _one(uid: str, url: str) -> tuple[str, str, dict]:
     async with _sema:
         log.info("fetching status for %s", url)
         try:
-            res = await fetch_status(url)
+            res = await asyncio.wait_for(fetch_status(url), timeout=FETCH_HARD_TIMEOUT_SEC)
             log.info("got status for %s: %s", _track_id(url), res)
             return uid, url, res
+        except asyncio.TimeoutError:
+            log.error("hard timeout (%ds) for %s", FETCH_HARD_TIMEOUT_SEC, url)
+            return uid, url, {"label": None, "date": None, "eta": None,
+                              "error": f"timeout {FETCH_HARD_TIMEOUT_SEC}s"}
         except Exception as e:
             log.exception("fetch failed for %s", url)
             short = str(e).splitlines()[0][:200] if str(e) else type(e).__name__
