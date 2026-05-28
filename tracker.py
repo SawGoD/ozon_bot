@@ -124,8 +124,37 @@ def _load_cookies() -> list[dict]:
     return result
 
 
+FETCH_TIMEOUT_SEC = int(os.environ.get("FETCH_TIMEOUT_SEC", "150"))
+BODY_READ_TIMEOUT_MS = 10_000
+
+
+async def _safe_close(obj, label: str) -> None:
+    if obj is None:
+        return
+    try:
+        await obj.close()
+    except Exception:
+        log.exception("[tracker] %s close failed", label)
+
+
 async def fetch_status(url: str, timeout_ms: int = 60_000) -> dict:
-    """Возвращает dict: {label, date, eta, error}. error=None при успехе."""
+    """Возвращает dict: {label, date, eta, error}. error=None при успехе.
+
+    Жёсткие лимиты: общий таймаут FETCH_TIMEOUT_SEC, навигация/API — timeout_ms,
+    чтение body — BODY_READ_TIMEOUT_MS. Браузер и контекст закрываются всегда.
+    """
+    try:
+        return await asyncio.wait_for(
+            _fetch_status_inner(url, timeout_ms), timeout=FETCH_TIMEOUT_SEC
+        )
+    except asyncio.TimeoutError:
+        log.error("[tracker] hard timeout %ds for %s", FETCH_TIMEOUT_SEC, url)
+        return {"label": None, "desc": "", "date": None, "eta": None,
+                "stage": None, "total": TOTAL_STAGES,
+                "error": f"timeout {FETCH_TIMEOUT_SEC}s"}
+
+
+async def _fetch_status_inner(url: str, timeout_ms: int) -> dict:
     log.info("[tracker] launching browser for %s", url)
     cookies = _load_cookies()
     async with async_playwright() as p:
@@ -139,21 +168,24 @@ async def fetch_status(url: str, timeout_ms: int = 60_000) -> dict:
                 "--window-size=1366,768",
             ],
         )
-        context = await browser.new_context(
-            user_agent=USER_AGENT,
-            locale="ru-RU",
-            timezone_id="Europe/Moscow",
-            viewport={"width": 1366, "height": 768},
-            extra_http_headers={"Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8"},
-        )
-        if cookies:
-            try:
-                await context.add_cookies(cookies)
-                log.info("[tracker] cookies applied")
-            except Exception:
-                log.exception("[tracker] failed to apply cookies")
-        page = await context.new_page()
+        context = None
         try:
+            context = await browser.new_context(
+                user_agent=USER_AGENT,
+                locale="ru-RU",
+                timezone_id="Europe/Moscow",
+                viewport={"width": 1366, "height": 768},
+                extra_http_headers={"Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8"},
+            )
+            context.set_default_timeout(timeout_ms)
+            context.set_default_navigation_timeout(timeout_ms)
+            if cookies:
+                try:
+                    await context.add_cookies(cookies)
+                    log.info("[tracker] cookies applied")
+                except Exception:
+                    log.exception("[tracker] failed to apply cookies")
+            page = await context.new_page()
             log.info("[tracker] goto %s", url)
             try:
                 async with page.expect_response(
@@ -163,9 +195,11 @@ async def fetch_status(url: str, timeout_ms: int = 60_000) -> dict:
                 resp = await resp_info.value
                 log.info("[tracker] API response %s %s", resp.status, resp.url)
                 if resp.status != 200:
-                    body_text = await page.inner_text("body")
-                    _dump_debug(url, await page.content(), body_text)
-                    return {"label": None, "desc": "", "date": None, "eta": None, "stage": None, "total": TOTAL_STAGES, "error": f"HTTP {resp.status}"}
+                    body_text = await _safe_body(page)
+                    _dump_debug(url, await _safe_content(page), body_text)
+                    return {"label": None, "desc": "", "date": None, "eta": None,
+                            "stage": None, "total": TOTAL_STAGES,
+                            "error": f"HTTP {resp.status}"}
                 data = await resp.json()
                 result = _status_from_api(data)
                 log.info("[tracker] parsed: %s", result)
@@ -173,17 +207,37 @@ async def fetch_status(url: str, timeout_ms: int = 60_000) -> dict:
             except Exception as e:
                 log.warning("[tracker] API wait failed: %s — fallback to body parsing", e)
                 await asyncio.sleep(3)
-                body_text = await page.inner_text("body")
+                body_text = await _safe_body(page)
                 log.info("[tracker] body preview: %s", body_text[:300].replace("\n", " | "))
                 if _is_antibot(body_text):
-                    _dump_debug(url, await page.content(), body_text)
-                    return {"label": None, "desc": "", "date": None, "eta": None, "stage": None, "total": TOTAL_STAGES, "error": "antibot (обнови cookies.json)"}
-                _dump_debug(url, await page.content(), body_text)
-                return {"label": None, "desc": "", "date": None, "eta": None, "stage": None, "total": TOTAL_STAGES, "error": "статус не распознан"}
+                    _dump_debug(url, await _safe_content(page), body_text)
+                    return {"label": None, "desc": "", "date": None, "eta": None,
+                            "stage": None, "total": TOTAL_STAGES,
+                            "error": "antibot (обнови cookies.json)"}
+                _dump_debug(url, await _safe_content(page), body_text)
+                return {"label": None, "desc": "", "date": None, "eta": None,
+                        "stage": None, "total": TOTAL_STAGES,
+                        "error": "статус не распознан"}
         finally:
-            await context.close()
-            await browser.close()
+            await _safe_close(context, "context")
+            await _safe_close(browser, "browser")
             log.info("[tracker] browser closed")
+
+
+async def _safe_body(page) -> str:
+    try:
+        return await page.inner_text("body", timeout=BODY_READ_TIMEOUT_MS)
+    except Exception:
+        log.debug("[tracker] inner_text failed", exc_info=True)
+        return ""
+
+
+async def _safe_content(page) -> str:
+    try:
+        return await page.content()
+    except Exception:
+        log.debug("[tracker] page.content failed", exc_info=True)
+        return ""
 
 
 def _status_from_api(data: dict) -> dict:
