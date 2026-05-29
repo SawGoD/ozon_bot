@@ -278,7 +278,11 @@ async def _one(uid: str, url: str) -> tuple[str, str, dict]:
 
 async def _edit_all_pinned(app_bot, text: str, kb: InlineKeyboardMarkup, except_msg: tuple[int, int] | None = None) -> None:
     """Перерисовать закреплённое сообщение во всех чатах. except_msg=(chat_id, msg_id) пропускается."""
-    for chat_id, msg_id in load_pinned().items():
+    pinned = load_pinned()
+    if not pinned:
+        log.warning("no pinned messages to edit (pinned_message.json пуст)")
+        return
+    for chat_id, msg_id in pinned.items():
         if except_msg and (int(chat_id), msg_id) == except_msg:
             continue
         try:
@@ -286,8 +290,13 @@ async def _edit_all_pinned(app_bot, text: str, kb: InlineKeyboardMarkup, except_
                 text, chat_id=int(chat_id), message_id=msg_id,
                 reply_markup=kb, parse_mode=ParseMode.MARKDOWN_V2,
             )
-        except Exception:
-            log.debug("could not edit pinned message in chat %s", chat_id)
+            log.info("pinned message edited in chat %s msg %s", chat_id, msg_id)
+        except Exception as e:
+            err = str(e)
+            if "Message is not modified" in err:
+                log.debug("pinned not modified for chat %s", chat_id)
+            else:
+                log.warning("failed to edit pinned in chat %s msg %s: %s", chat_id, msg_id, err)
 
 
 async def check_all() -> list[tuple[str, str, dict]]:
