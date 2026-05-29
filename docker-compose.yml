@@ -8,6 +8,28 @@ services:
       TZ: Europe/Moscow
     volumes:
       - ./data:/data
+
+    # --- Лимиты ресурсов (1.2 ГБ RAM, ~1.5 CPU, ограничение PID) ---
+    mem_limit: 1200m
+    memswap_limit: 1200m   # swap отключён, контейнер не сможет «вылезти» в своп
+    mem_reservation: 512m
+    cpus: 1.5
+    pids_limit: 512
+    oom_kill_disable: false
+
+    # --- Лимит размера на запись внутри контейнера (~3 ГБ) ---
+    # Работает только на storage driver = overlay2 c xfs+pquota или devicemapper.
+    # На стандартном overlay2 поверх ext4 опция молча игнорируется — это норма.
+    # Реальная пользовательская папка ./data висит на хосте и под этот лимит не попадает.
+    storage_opt:
+      size: "3G"
+
+    # /tmp и /var/tmp в tmpfs, чтобы Chromium-кэш не рос на диске
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+      - /var/tmp:size=256m,mode=1777
+
+    # --- Логи docker: ~15 МБ суммарно (укладываемся в 3 ГБ с большим запасом) ---
     logging:
       driver: json-file
       options:
