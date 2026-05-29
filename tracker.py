@@ -7,6 +7,23 @@ from pathlib import Path
 
 DEBUG_DUMP = os.environ.get("DEBUG_DUMP", "0").lower() in ("1", "true", "yes", "on")
 
+# Опциональный прокси для Chromium (обход RU-blocked IP)
+# PROXY_SERVER: "http://host:port" | "socks5://host:port"
+PROXY_SERVER = os.environ.get("PROXY_SERVER", "").strip() or None
+PROXY_USERNAME = os.environ.get("PROXY_USERNAME", "").strip() or None
+PROXY_PASSWORD = os.environ.get("PROXY_PASSWORD", "").strip() or None
+
+
+def _proxy_config() -> dict | None:
+    if not PROXY_SERVER:
+        return None
+    cfg: dict = {"server": PROXY_SERVER}
+    if PROXY_USERNAME:
+        cfg["username"] = PROXY_USERNAME
+    if PROXY_PASSWORD:
+        cfg["password"] = PROXY_PASSWORD
+    return cfg
+
 from playwright.async_api import async_playwright
 
 log = logging.getLogger("ozon-bot.tracker")
@@ -171,8 +188,11 @@ async def _fetch_status_inner(url: str, timeout_ms: int) -> dict:
                 "stage": None, "total": TOTAL_STAGES,
                 "error": "нет cookies — пришлите cookies.json в чат"}
     log.info("[tracker] launching browser for %s", url)
+    proxy = _proxy_config()
+    if proxy:
+        log.info("[tracker] using proxy: %s", proxy["server"])
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
+        launch_kwargs = dict(
             headless=False,
             args=[
                 "--no-sandbox",
@@ -182,6 +202,9 @@ async def _fetch_status_inner(url: str, timeout_ms: int) -> dict:
                 "--window-size=1366,768",
             ],
         )
+        if proxy:
+            launch_kwargs["proxy"] = proxy
+        browser = await p.chromium.launch(**launch_kwargs)
         context = None
         try:
             context = await browser.new_context(
