@@ -18,11 +18,16 @@ services:
     oom_kill_disable: false
 
     # --- Лимит размера на запись внутри контейнера (~3 ГБ) ---
-    # Работает только на storage driver = overlay2 c xfs+pquota или devicemapper.
-    # На стандартном overlay2 поверх ext4 опция молча игнорируется — это норма.
-    # Реальная пользовательская папка ./data висит на хосте и под этот лимит не попадает.
-    storage_opt:
-      size: "3G"
+    # storage_opt.size работает ТОЛЬКО на overlay2 поверх xfs с опцией pquota
+    # (или devicemapper). На ext4 Docker отказывается стартовать контейнер с этой опцией,
+    # поэтому она по умолчанию отключена. Если у вас xfs+pquota — раскомментируйте:
+    # storage_opt:
+    #   size: "3G"
+    #
+    # На ext4 рост рантайма ограничивается косвенно:
+    #  • tmpfs ниже не даёт Chromium-кэшу осесть на диск;
+    #  • логи docker ограничены 5m × 3 ≈ 15 МБ;
+    #  • папка ./data висит на хосте (cookies/tracks/pinned весят килобайты, logs ротируются ~15 МБ).
 
     # /tmp и /var/tmp в tmpfs, чтобы Chromium-кэш не рос на диске
     tmpfs:
