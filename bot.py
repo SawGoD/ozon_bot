@@ -164,9 +164,35 @@ def load_tracks() -> dict[str, dict]:
     out: dict[str, dict] = {}
     for uid, val in raw.items():
         if isinstance(val, str):
-            out[uid] = {"url": val, "state": None}
+            out[uid] = {"url": val, "state": None, "last": None}
         elif isinstance(val, dict):
-            out[uid] = {"url": val.get("url", ""), "state": val.get("state")}
+            out[uid] = {
+                "url": val.get("url", ""),
+                "state": val.get("state"),
+                "last": val.get("last"),
+            }
+    return out
+
+
+def _strip_for_storage(r: dict) -> dict:
+    """Копия r без бинарных полей (png) — для сохранения в tracks.json."""
+    return {k: v for k, v in r.items() if k != "png"}
+
+
+def _results_from_cache() -> list[tuple[str, str, dict]]:
+    """Соберём «результаты» для рендера пина из кэша tracks.json — без сетевых запросов."""
+    tracks = load_tracks()
+    out: list[tuple[str, str, dict]] = []
+    for uid, e in tracks.items():
+        url = e.get("url") or ""
+        last = e.get("last")
+        if last:
+            r = dict(last)
+        else:
+            # Нового трека ещё не пуляли — покажем как «ожидаем данные».
+            r = {"label": None, "desc": "", "date": None, "eta": None,
+                 "stage": None, "total": 19, "error": "ожидание данных"}
+        out.append((uid, url, r))
     return out
 
 
@@ -302,6 +328,7 @@ async def _detect_and_notify(app_bot, results: list[tuple[str, str, dict]]) -> N
             changes.append((tid, old_label, new_label, new_desc, when, r.get("png")))
         if uid in tracks:
             tracks[uid]["state"] = flat
+            tracks[uid]["last"] = _strip_for_storage(r)
     save_tracks(tracks)
     for tid, old, new, desc, date, png in changes:
         msg = (
@@ -394,6 +421,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     for uid, _url, r in results:
         if uid in tracks and not r.get("error"):
             tracks[uid]["state"] = _flat(r)
+            tracks[uid]["last"] = _strip_for_storage(r)
     save_tracks(tracks)
 
 
@@ -464,8 +492,8 @@ async def on_cookies_upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def _refresh_pinned(app_bot) -> None:
-    results = await check_all()
-    text, kb = _render(results)
+    """Перерисовать пин из кэша tracks.json — без сетевых запросов."""
+    text, kb = _render(_results_from_cache())
     await _edit_all_pinned(app_bot, text, kb)
 
 
@@ -553,6 +581,7 @@ async def on_track_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     for uid, _u, r in fetch_results:
         if uid in tracks and not r.get("error"):
             tracks[uid]["state"] = _flat(r)
+            tracks[uid]["last"] = _strip_for_storage(r)
     save_tracks(tracks)
     lines = [f"\\+ {link_tid(u)}" for _uid, u in added]
     out = "*📦 \\+* Добавлено:\n" + "\n".join(lines)
