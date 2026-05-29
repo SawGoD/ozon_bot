@@ -120,7 +120,16 @@ def _load_cookies() -> list[dict]:
             except (TypeError, ValueError):
                 pass
         result.append(out)
-    log.info("[tracker] loaded %d cookies", len(result))
+    domains = sorted({c["domain"] for c in result})
+    names = sorted({c["name"] for c in result})
+    log.info("[tracker] loaded %d cookies from domains=%s", len(result), domains)
+    log.debug("[tracker] cookie names: %s", names)
+    if len(result) < 10:
+        log.warning(
+            "[tracker] only %d cookies loaded — Cookie-Editor должен быть на www.ozon.ru, "
+            "а не на tracking.ozon.ru (там пусто). Экспортируйте полный набор.",
+            len(result),
+        )
     return result
 
 
