@@ -104,7 +104,7 @@ STATE_FILE = Path(os.environ.get("STATE_FILE", "/data/state.json"))
 TRACKS_FILE = Path(os.environ.get("TRACKS_FILE", "/data/tracks.json"))
 POLL_MIN_SEC = int(os.environ.get("POLL_MIN_SEC", "1800"))   # 30 мин
 POLL_MAX_SEC = int(os.environ.get("POLL_MAX_SEC", "3540"))   # 59 мин
-CONCURRENCY = max(1, min(5, int(os.environ.get("CONCURRENCY", "5"))))
+CONCURRENCY = max(1, min(5, int(os.environ.get("CONCURRENCY", "1"))))
 
 REFRESH_CB = "refresh"
 ACK_CB = "ack"
