@@ -245,9 +245,13 @@ async def _fetch_status_inner(url: str, timeout_ms: int) -> dict:
                     await page.wait_for_load_state("networkidle", timeout=5_000)
                 except Exception:
                     pass
+                # Скрин «до раскрытия» — для алёртов о смене ETA (компактный вид).
+                result["png_short"] = await _safe_screenshot(page)
                 await _expand_collapsibles(page)
+                # Скрин «после раскрытия» — для алёртов о смене статуса (полная история).
                 result["png"] = await _safe_screenshot(page)
-                log.info("[tracker] parsed: %s", {k: v for k, v in result.items() if k != "png"})
+                log.info("[tracker] parsed: %s",
+                         {k: v for k, v in result.items() if k not in ("png", "png_short")})
                 return result
             except Exception as e:
                 log.warning("[tracker] API wait failed: %s — fallback to body parsing", e)

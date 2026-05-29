@@ -175,8 +175,8 @@ def load_tracks() -> dict[str, dict]:
 
 
 def _strip_for_storage(r: dict) -> dict:
-    """Копия r без бинарных полей (png) — для сохранения в tracks.json."""
-    return {k: v for k, v in r.items() if k != "png"}
+    """Копия r без бинарных полей (png, png_short) — для сохранения в tracks.json."""
+    return {k: v for k, v in r.items() if k not in ("png", "png_short")}
 
 
 def _results_from_cache() -> list[tuple[str, str, dict]]:
@@ -264,7 +264,7 @@ async def _one(uid: str, url: str) -> tuple[str, str, dict]:
         try:
             res = await asyncio.wait_for(fetch_status(url), timeout=FETCH_HARD_TIMEOUT_SEC)
             log.info("got status for %s: %s", _track_id(url),
-                     {k: v for k, v in res.items() if k != "png"})
+                     {k: v for k, v in res.items() if k not in ("png", "png_short")})
             return uid, url, res
         except asyncio.TimeoutError:
             log.error("hard timeout (%ds) for %s", FETCH_HARD_TIMEOUT_SEC, url)
@@ -313,7 +313,7 @@ async def _detect_and_notify(app_bot, results: list[tuple[str, str, dict]]) -> N
     """Сравнить с сохранённым state, обновить state и при изменениях прислать алёрт в CHAT_ID."""
     tracks = load_tracks()
     label_changes: list[tuple[str, str, str, str, str, bytes | None]] = []
-    eta_changes: list[tuple[str, str, str]] = []  # tid, old_eta, new_eta
+    eta_changes: list[tuple[str, str, str, bytes | None]] = []  # tid, old_eta, new_eta, png_short
     for uid, url, r in results:
         tid = _track_id(url)
         if r.get("error"):
@@ -331,7 +331,7 @@ async def _detect_and_notify(app_bot, results: list[tuple[str, str, dict]]) -> N
             label_changes.append((tid, prev_label, new_label, new_desc, when, r.get("png")))
         if prev_eta and prev_eta != new_eta:
             log.info("ETA changed for %s: %r -> %r", tid, prev_eta, new_eta)
-            eta_changes.append((tid, prev_eta, new_eta or "—"))
+            eta_changes.append((tid, prev_eta, new_eta or "—", r.get("png_short")))
         if uid in tracks:
             tracks[uid]["state"] = flat
             tracks[uid]["last"] = _strip_for_storage(r)
@@ -365,19 +365,31 @@ async def _detect_and_notify(app_bot, results: list[tuple[str, str, dict]]) -> N
                 )
             except Exception:
                 log.exception("failed to send notification")
-    for tid, old_eta, new_eta in eta_changes:
+    for tid, old_eta, new_eta, png_short in eta_changes:
         msg = (
             f"Изменена дата доставки *{link_tid(tid)}*\n"
             f"`├ `~ETA {md(old_eta)}~\n"
             f"`└ ETA {md(new_eta)}`"
         )
-        try:
-            await app_bot.send_message(
-                CHAT_ID, msg, parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=_ACK_KB,
-            )
-        except Exception:
-            log.exception("failed to send ETA notification")
+        sent = False
+        if png_short:
+            try:
+                from io import BytesIO
+                await app_bot.send_photo(
+                    CHAT_ID, photo=BytesIO(png_short), caption=msg,
+                    parse_mode=ParseMode.MARKDOWN_V2, reply_markup=_ACK_KB,
+                )
+                sent = True
+            except Exception:
+                log.exception("failed to send ETA notification with photo, fallback to text")
+        if not sent:
+            try:
+                await app_bot.send_message(
+                    CHAT_ID, msg, parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=_ACK_KB,
+                )
+            except Exception:
+                log.exception("failed to send ETA notification")
 
 
 def _kb(loading: bool = False) -> InlineKeyboardMarkup:
