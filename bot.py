@@ -619,8 +619,23 @@ async def poll_loop(app: Application) -> None:
         await _edit_all_pinned(app.bot, text, kb)
 
 
+HEARTBEAT_FILE = Path("/data/heartbeat")
+HEARTBEAT_INTERVAL_SEC = 30
+
+
+async def heartbeat_loop() -> None:
+    while True:
+        try:
+            HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
+            HEARTBEAT_FILE.touch()
+        except Exception:
+            log.exception("heartbeat write failed")
+        await asyncio.sleep(HEARTBEAT_INTERVAL_SEC)
+
+
 async def on_startup(app: Application) -> None:
     asyncio.create_task(poll_loop(app))
+    asyncio.create_task(heartbeat_loop())
 
 
 async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:

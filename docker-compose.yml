@@ -34,6 +34,17 @@ services:
       - /tmp:size=512m,mode=1777
       - /var/tmp:size=256m,mode=1777
 
+    # --- Healthcheck: heartbeat-файл обновляется ботом каждые 30с ---
+    # «Здоров», если /data/heartbeat существует и был обновлён ≤ 120с назад.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - test -f /data/heartbeat && [ $(($(date +%s) - $(stat -c %Y /data/heartbeat))) -lt 120 ]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
     # --- Логи docker: ~15 МБ суммарно (укладываемся в 3 ГБ с большим запасом) ---
     logging:
       driver: json-file
