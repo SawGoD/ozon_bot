@@ -155,8 +155,13 @@ async def fetch_status(url: str, timeout_ms: int = 60_000) -> dict:
 
 
 async def _fetch_status_inner(url: str, timeout_ms: int) -> dict:
-    log.info("[tracker] launching browser for %s", url)
     cookies = _load_cookies()
+    if not cookies:
+        log.warning("[tracker] no cookies — skipping browser launch for %s", url)
+        return {"label": None, "desc": "", "date": None, "eta": None,
+                "stage": None, "total": TOTAL_STAGES,
+                "error": "нет cookies — пришлите cookies.json в чат"}
+    log.info("[tracker] launching browser for %s", url)
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=False,
