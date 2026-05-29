@@ -623,6 +623,19 @@ async def on_startup(app: Application) -> None:
     asyncio.create_task(poll_loop(app))
 
 
+async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    err = ctx.error
+    # Типичный шум — нажатие на старую/протухшую callback-кнопку.
+    msg = str(err) if err else ""
+    if "Query is too old" in msg or "query id is invalid" in msg.lower():
+        log.debug("stale callback ignored: %s", msg)
+        return
+    if "Message is not modified" in msg:
+        log.debug("edit no-op ignored")
+        return
+    log.error("unhandled exception in handler: %s", err, exc_info=err)
+
+
 def main() -> None:
     _seed_tracks_from_env()
     _migrate_legacy_state()
@@ -636,6 +649,7 @@ def main() -> None:
         .post_init(on_startup)
         .build()
     )
+    app.add_error_handler(on_error)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(MessageHandler(filters.Regex(r"^/del_[A-Za-z0-9]+"), cmd_del))
     app.add_handler(CallbackQueryHandler(on_refresh, pattern=f"^{REFRESH_CB}$"))
