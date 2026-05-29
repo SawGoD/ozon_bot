@@ -245,6 +245,7 @@ async def _fetch_status_inner(url: str, timeout_ms: int) -> dict:
                     await page.wait_for_load_state("networkidle", timeout=5_000)
                 except Exception:
                     pass
+                await _expand_collapsibles(page)
                 result["png"] = await _safe_screenshot(page)
                 log.info("[tracker] parsed: %s", {k: v for k, v in result.items() if k != "png"})
                 return result
@@ -276,9 +277,37 @@ async def _safe_body(page) -> str:
         return ""
 
 
+async def _expand_collapsibles(page) -> None:
+    """Раскрыть «Показать больше» / «Показать ещё» / «Показать все события» и т.п."""
+    texts = [
+        "Показать больше",
+        "Показать ещё",
+        "Показать все события",
+        "Показать все",
+        "Показать всё",
+        "Развернуть",
+    ]
+    for _ in range(3):  # на случай вложенных коллапсов
+        clicked = False
+        for t in texts:
+            try:
+                loc = page.locator(f'button:has-text("{t}"), a:has-text("{t}")').first
+                if await loc.count() and await loc.is_visible():
+                    await loc.scroll_into_view_if_needed(timeout=2_000)
+                    await loc.click(timeout=2_000)
+                    log.info("[tracker] expanded: %s", t)
+                    await page.wait_for_timeout(400)
+                    clicked = True
+                    break
+            except Exception:
+                log.debug("[tracker] expand attempt failed for %r", t, exc_info=True)
+        if not clicked:
+            break
+
+
 async def _safe_screenshot(page) -> bytes | None:
     try:
-        return await page.screenshot(full_page=False, timeout=10_000, type="png")
+        return await page.screenshot(full_page=True, timeout=10_000, type="png")
     except Exception:
         log.debug("[tracker] screenshot failed", exc_info=True)
         return None
