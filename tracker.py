@@ -159,8 +159,8 @@ async def _safe_close(obj, label: str) -> None:
         return
     try:
         await obj.close()
-    except Exception:
-        log.exception("[tracker] %s close failed", label)
+    except Exception as e:
+        log.warning("[tracker] %s close failed: %s", label, e)
 
 
 async def fetch_status(url: str, timeout_ms: int = 60_000) -> dict:
