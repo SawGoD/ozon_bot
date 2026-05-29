@@ -237,7 +237,8 @@ async def _one(uid: str, url: str) -> tuple[str, str, dict]:
         log.info("fetching status for %s", url)
         try:
             res = await asyncio.wait_for(fetch_status(url), timeout=FETCH_HARD_TIMEOUT_SEC)
-            log.info("got status for %s: %s", _track_id(url), res)
+            log.info("got status for %s: %s", _track_id(url),
+                     {k: v for k, v in res.items() if k != "png"})
             return uid, url, res
         except asyncio.TimeoutError:
             log.error("hard timeout (%ds) for %s", FETCH_HARD_TIMEOUT_SEC, url)
