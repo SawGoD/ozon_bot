@@ -239,7 +239,14 @@ async def _fetch_status_inner(url: str, timeout_ms: int) -> dict:
                             "error": f"HTTP {resp.status}"}
                 data = await resp.json()
                 result = _status_from_api(data)
-                log.info("[tracker] parsed: %s", result)
+                # Скрин страницы — прикрепится к алёрту при смене статуса.
+                # Небольшая задержка чтобы UI успел отрисоваться.
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=5_000)
+                except Exception:
+                    pass
+                result["png"] = await _safe_screenshot(page)
+                log.info("[tracker] parsed: %s", {k: v for k, v in result.items() if k != "png"})
                 return result
             except Exception as e:
                 log.warning("[tracker] API wait failed: %s — fallback to body parsing", e)
@@ -267,6 +274,14 @@ async def _safe_body(page) -> str:
     except Exception:
         log.debug("[tracker] inner_text failed", exc_info=True)
         return ""
+
+
+async def _safe_screenshot(page) -> bytes | None:
+    try:
+        return await page.screenshot(full_page=False, timeout=10_000, type="png")
+    except Exception:
+        log.debug("[tracker] screenshot failed", exc_info=True)
+        return None
 
 
 async def _safe_content(page) -> str:

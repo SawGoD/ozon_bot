@@ -285,7 +285,7 @@ def _label_from_flat(flat: str | None) -> str:
 async def _detect_and_notify(app_bot, results: list[tuple[str, str, dict]]) -> None:
     """Сравнить с сохранённым state, обновить state и при изменениях прислать алёрт в CHAT_ID."""
     tracks = load_tracks()
-    changes: list[tuple[str, str, str, str, str]] = []  # tid, old_label, new_label, new_desc, date
+    changes: list[tuple[str, str, str, str, str, bytes | None]] = []
     for uid, url, r in results:
         tid = _track_id(url)
         if r.get("error"):
@@ -298,11 +298,11 @@ async def _detect_and_notify(app_bot, results: list[tuple[str, str, dict]]) -> N
             new_label = r.get("label") or "—"
             new_desc = r.get("desc") or ""
             when = r.get("dt_short") or r.get("date") or ""
-            changes.append((tid, old_label, new_label, new_desc, when))
+            changes.append((tid, old_label, new_label, new_desc, when, r.get("png")))
         if uid in tracks:
             tracks[uid]["state"] = flat
     save_tracks(tracks)
-    for tid, old, new, desc, date in changes:
+    for tid, old, new, desc, date, png in changes:
         msg = (
             f"Изменение статуса *{link_tid(tid)}*\n"
             f"`├ `~{md(old)}~\n"
@@ -312,13 +312,25 @@ async def _detect_and_notify(app_bot, results: list[tuple[str, str, dict]]) -> N
             msg += f"\n`  └ `||{md(desc)}||"
         if date:
             msg += f"\n\nДата {md(date)}"
-        try:
-            await app_bot.send_message(
-                CHAT_ID, msg, parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=_ACK_KB,
-            )
-        except Exception:
-            log.exception("failed to send notification")
+        sent = False
+        if png:
+            try:
+                from io import BytesIO
+                await app_bot.send_photo(
+                    CHAT_ID, photo=BytesIO(png), caption=msg,
+                    parse_mode=ParseMode.MARKDOWN_V2, reply_markup=_ACK_KB,
+                )
+                sent = True
+            except Exception:
+                log.exception("failed to send notification with photo, fallback to text")
+        if not sent:
+            try:
+                await app_bot.send_message(
+                    CHAT_ID, msg, parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=_ACK_KB,
+                )
+            except Exception:
+                log.exception("failed to send notification")
 
 
 def _kb(loading: bool = False) -> InlineKeyboardMarkup:
