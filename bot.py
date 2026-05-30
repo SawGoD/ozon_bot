@@ -175,8 +175,8 @@ def load_tracks() -> dict[str, dict]:
 
 
 def _strip_for_storage(r: dict) -> dict:
-    """Копия r без бинарных полей (png, png_short) — для сохранения в tracks.json."""
-    return {k: v for k, v in r.items() if k not in ("png", "png_short")}
+    """Копия r без бинарных и тяжёлых полей — для сохранения в tracks.json."""
+    return {k: v for k, v in r.items() if k not in ("png", "png_short", "stages")}
 
 
 def _results_from_cache() -> list[tuple[str, str, dict]]:
