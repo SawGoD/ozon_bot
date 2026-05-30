@@ -35,56 +35,32 @@ USER_AGENT = (
 
 API_URL_MARKER = "/p-api/ozon-track-bff/tracking/"
 
-# Полная упорядоченная цепочка этапов (как на сайте Ozon, 18 шагов):
-# (label, codes_aliases, description_under_spoiler).
-# Пустой кортеж codes — этап есть на сайте, но соответствующий API event-код пока неизвестен.
-STAGES: list[tuple[str, tuple[str, ...], str]] = [
-    ("Создан", ("Created",), "Мы получили заказ, продавец уже собирает его"),
-    ("Передается в доставку", ("TransferringToDelivery",),
-     "Продавец собрал заказ и передаёт его в доставку. Обычно это занимает до 10 дней"),
-    ("Заказ принят перевозчиком", ("WayToCity",),
-     "Он отвезёт заказ на таможню. Товары пройдут таможенное оформление в стране отправления и в стране назначения."),
-    ("Заказ везут на таможню в стране отправления", ("ParcelDepartureFromCarrier",),
-     "Обычно это занимает до 10 дней"),
-    ("Заказ привезли на таможню для экспортного таможенного оформления", ("ArrivedToOutwardExchangeOffice",),
-     "Скорость оформления зависит от загруженности таможни"),
-    ("Заказ покинул зону экспортного таможенного оформления", ("OutFromOutwardExchangeOffice",), ""),
-    ("Заказ спешит в страну назначения", (), ""),
-    ("Заказ на пути к границе страны назначения", ("OnTheWayToImportCustomsClearancePhantomStatus",),
-     "Путь может занять от 1 дня до недели"),
-    ("Заказ привезли в страну назначения", (), "Его отвезут на таможенное оформление"),
-    ("Заказ передан на импортное таможенное оформление", ("ArrivedToInwardExchangeOffice",),
-     "Его готовят к оформлению"),
-    ("Заказ проходит импортное таможенное оформление", ("InwardCustomsProcessing",), ""),
-    ("Заказ выпущен импортной таможней", ("OutFromInwardExchangeOffice",),
-     "Его готовят к отправке на сортировочный терминал. Обычно это занимает от 8 до 12 дней"),
-    ("Заказ отправили на сортировочный терминал", ("SentToSortingCenter",),
-     "Его подготовят к доставке в город получателя"),
-    ("Заказ покинул сортировочный терминал", ("DepartedFromSortingTerminal",),
-     "Его подготовили к доставке в город получателя"),
-    ("Заказ ожидает отправки в город получателя", ("WaitingForDispatchToCity",),
-     "Скорость отправки зависит от загруженности склада"),
-    ("Заказ везут в город получателя", ("ArrivedToCity", "ArrivedToDeliveryCity"),
-     "Его доставят в сортировочный центр"),
-    ("Заказ везут", (), "Мы сообщим, когда его доставят"),
-    ("Заказ в пункте выдачи", ("ArrivedToPickupPoint", "ReadyForPickup"),
-     "Успейте забрать его в течение 14 дней."),
-    ("Заказ получен в пункте выдачи", ("Delivered", "Received"), ""),
-]
-TOTAL_STAGES = len(STAGES)
-
-# Быстрый lookup: event_code → (index_1_based, label, description).
-_EVENT_INDEX: dict[str, tuple[int, str, str]] = {}
-for _i, (_label, _codes, _desc) in enumerate(STAGES, start=1):
-    for _c in _codes:
-        _EVENT_INDEX[_c] = (_i, _label, _desc)
-
-# Терминальные/отрицательные события вне основной цепочки.
+# Терминальные/отрицательные коды — fallback на случай, если DOM не отдаст этапы.
 TERMINAL_LABELS = {
     "Cancelled": "Отменён",
     "Returned": "Возвращён",
     "ReturnedToSeller": "Возвращён продавцу",
 }
+
+# JS-сниппет: тянет полный список этапов из DOM (zag3p — детальная вертикальная лента).
+# Класс-хэши Ozon регулярно меняются — поэтому матчим по подстрокам внутри class*=.
+STAGES_JS = r"""
+(() => {
+  const items = document.querySelectorAll('[class*="itemContainer"][class*="zag3p"]');
+  return [...items].map(el => {
+    const status = el.querySelector('[class*="status"][class*="zag3p"]');
+    const date   = el.querySelector('[class*="date"][class*="zag3p"]');
+    const desc   = el.querySelector('[class*="description"][class*="zag3p"]');
+    const inactive = status ? /_inactive/.test(status.className) : true;
+    return {
+      label: status ? status.textContent.trim() : null,
+      date:  date   ? date.textContent.trim()   : null,
+      desc:  desc   ? desc.textContent.trim()   : null,
+      active: !inactive,
+    };
+  }).filter(s => s.label);
+})()
+"""
 
 OFFLINE_PATTERNS = (
     re.compile(r"похоже,?\s*нет\s*соединения", re.IGNORECASE),
@@ -175,18 +151,14 @@ async def fetch_status(url: str, timeout_ms: int = 60_000) -> dict:
         )
     except asyncio.TimeoutError:
         log.error("[tracker] hard timeout %ds for %s", FETCH_TIMEOUT_SEC, url)
-        return {"label": None, "desc": "", "date": None, "eta": None,
-                "stage": None, "total": TOTAL_STAGES,
-                "error": f"timeout {FETCH_TIMEOUT_SEC}s"}
+        return _error_result(f"timeout {FETCH_TIMEOUT_SEC}s")
 
 
 async def _fetch_status_inner(url: str, timeout_ms: int) -> dict:
     cookies = _load_cookies()
     if not cookies:
         log.warning("[tracker] no cookies — skipping browser launch for %s", url)
-        return {"label": None, "desc": "", "date": None, "eta": None,
-                "stage": None, "total": TOTAL_STAGES,
-                "error": "нет cookies — пришлите cookies.json в чат"}
+        return _error_result("нет cookies — пришлите cookies.json в чат")
     log.info("[tracker] launching browser for %s", url)
     proxy = _proxy_config()
     if proxy:
@@ -234,24 +206,29 @@ async def _fetch_status_inner(url: str, timeout_ms: int) -> dict:
                 if resp.status != 200:
                     body_text = await _safe_body(page)
                     _dump_debug(url, await _safe_content(page), body_text)
-                    return {"label": None, "desc": "", "date": None, "eta": None,
-                            "stage": None, "total": TOTAL_STAGES,
-                            "error": f"HTTP {resp.status}"}
-                data = await resp.json()
-                result = _status_from_api(data)
-                # Скрин страницы — прикрепится к алёрту при смене статуса.
-                # Небольшая задержка чтобы UI успел отрисоваться.
+                    return _error_result(f"HTTP {resp.status}")
+                api_data = await resp.json()
+                # Ждём рендера Nuxt, потом снимаем «компактный» скрин и раскрываем коллапсы.
                 try:
                     await page.wait_for_load_state("networkidle", timeout=5_000)
                 except Exception:
                     pass
-                # Скрин «до раскрытия» — для алёртов о смене ETA (компактный вид).
-                result["png_short"] = await _safe_screenshot(page)
+                png_short = await _safe_screenshot(page)
                 await _expand_collapsibles(page)
-                # Скрин «после раскрытия» — для алёртов о смене статуса (полная история).
-                result["png"] = await _safe_screenshot(page)
+                # Тянем этапы из DOM (после раскрытия).
+                stages = []
+                try:
+                    stages = await page.evaluate(STAGES_JS) or []
+                    log.info("[tracker] extracted %d stages from DOM", len(stages))
+                except Exception:
+                    log.exception("[tracker] DOM stages extraction failed")
+                png = await _safe_screenshot(page)
+                result = _build_result(api_data, stages)
+                result["png_short"] = png_short
+                result["png"] = png
                 log.info("[tracker] parsed: %s",
-                         {k: v for k, v in result.items() if k not in ("png", "png_short")})
+                         {k: v for k, v in result.items()
+                          if k not in ("png", "png_short", "stages")})
                 return result
             except Exception as e:
                 log.warning("[tracker] API wait failed: %s — fallback to body parsing", e)
@@ -260,13 +237,9 @@ async def _fetch_status_inner(url: str, timeout_ms: int) -> dict:
                 log.info("[tracker] body preview: %s", body_text[:300].replace("\n", " | "))
                 if _is_antibot(body_text):
                     _dump_debug(url, await _safe_content(page), body_text)
-                    return {"label": None, "desc": "", "date": None, "eta": None,
-                            "stage": None, "total": TOTAL_STAGES,
-                            "error": "antibot (обнови cookies.json)"}
+                    return _error_result("antibot (обнови cookies.json)")
                 _dump_debug(url, await _safe_content(page), body_text)
-                return {"label": None, "desc": "", "date": None, "eta": None,
-                        "stage": None, "total": TOTAL_STAGES,
-                        "error": "статус не распознан"}
+                return _error_result("статус не распознан")
         finally:
             await _safe_close(context, "context")
             await _safe_close(browser, "browser")
@@ -325,66 +298,89 @@ async def _safe_content(page) -> str:
         return ""
 
 
-def _status_from_api(data: dict) -> dict:
-    items = data.get("items") or []
+def _error_result(err: str) -> dict:
+    return {"label": None, "desc": "", "date": None, "dt_short": None,
+            "eta": None, "stage": None, "total": None, "stages": [], "error": err}
+
+
+def _format_eta(data: dict) -> str | None:
+    dbeg, dend = data.get("deliveryDateBegin"), data.get("deliveryDateEnd")
+    if not (isinstance(dbeg, str) and isinstance(dend, str)):
+        return None
+    try:
+        yb, mb, db = dbeg[:10].split("-")
+        ye, me, de = dend[:10].split("-")
+        return f"{db}.{mb}" if (yb, mb, db) == (ye, me, de) else f"{db}.{mb}–{de}.{me}"
+    except Exception:
+        return None
+
+
+def _format_moment(moment: str | None) -> tuple[str | None, str | None]:
+    """ISO → (date 'dd.mm.yyyy', dt_short 'dd.mm.yy HH:MM')."""
+    if not isinstance(moment, str) or len(moment) < 10:
+        return None, None
+    date = None
+    try:
+        y, m, d = moment[:10].split("-")
+        date = f"{d}.{m}.{y}"
+    except Exception:
+        pass
+    dt_short = None
+    try:
+        from datetime import datetime
+        dt_short = datetime.fromisoformat(moment).astimezone().strftime("%d.%m.%y %H:%M")
+    except Exception:
+        pass
+    return date, dt_short
+
+
+def _build_result(api_data: dict, stages: list[dict]) -> dict:
+    eta = _format_eta(api_data)
+    items = api_data.get("items") or []
+
+    # Терминальное состояние (отмена/возврат) — короткий путь.
+    if items:
+        last_code = items[-1].get("event", "")
+        if last_code in TERMINAL_LABELS:
+            date, dt_short = _format_moment(items[-1].get("moment"))
+            return {"label": TERMINAL_LABELS[last_code], "desc": "",
+                    "date": date, "dt_short": dt_short, "eta": eta,
+                    "stage": None, "total": None, "stages": [], "error": None}
+
+    if stages:
+        active = [i for i, s in enumerate(stages, 1) if s.get("active")]
+        cur_idx = active[-1] if active else len(stages)
+        cur = stages[cur_idx - 1]
+        # Дата с сайта вида "30.05.26, 18:58" — оставляем как есть.
+        date = cur.get("date") or None
+        return {"label": cur.get("label") or "—", "desc": cur.get("desc") or "",
+                "date": date, "dt_short": date, "eta": eta,
+                "stage": cur_idx, "total": len(stages),
+                "stages": stages, "error": None}
+
+    # DOM не отдал этапов — голый fallback из API.
     if not items:
-        return {"label": None, "desc": "", "date": None, "eta": None, "stage": None, "total": TOTAL_STAGES, "error": "нет событий"}
+        return _error_result("нет событий")
     last = items[-1]
     code = last.get("event", "")
-    desc = ""
-    if code in TERMINAL_LABELS:
-        label = TERMINAL_LABELS[code]
-        stage = None
-    else:
-        idx_label = _EVENT_INDEX.get(code)
-        if idx_label:
-            stage, label, desc = idx_label
-        else:
-            stage = None
-            human = _humanize_event_code(code) if code else "неизвестно"
-            label = f"Новый статус: {human} ({code})"
-            log.warning("[tracker] unknown event code: %r", code)
-    moment = last.get("moment", "")
-    date = None
-    dt_short = None
-    if isinstance(moment, str) and len(moment) >= 10:
-        try:
-            y, m, d = moment[:10].split("-")
-            date = f"{d}.{m}.{y}"
-        except Exception:
-            pass
-        try:
-            from datetime import datetime
-            dt = datetime.fromisoformat(moment).astimezone()
-            dt_short = dt.strftime("%d.%m.%y %H:%M")
-        except Exception:
-            pass
-
-    eta = None
-    dbeg, dend = data.get("deliveryDateBegin"), data.get("deliveryDateEnd")
-    if dbeg and dend and isinstance(dbeg, str) and isinstance(dend, str):
-        try:
-            yb, mb, db = dbeg[:10].split("-")
-            ye, me, de = dend[:10].split("-")
-            if (yb, mb, db) == (ye, me, de):
-                eta = f"{db}.{mb}"
-            else:
-                eta = f"{db}.{mb}–{de}.{me}"
-        except Exception:
-            pass
-    return {"label": label, "desc": desc, "date": date, "dt_short": dt_short, "eta": eta, "stage": stage, "total": TOTAL_STAGES, "error": None}
+    date, dt_short = _format_moment(last.get("moment"))
+    label = TERMINAL_LABELS.get(code) or f"Новый статус: {_humanize_event_code(code)} ({code})"
+    if code and code not in TERMINAL_LABELS:
+        log.warning("[tracker] DOM empty, falling back to API code: %r", code)
+    return {"label": label, "desc": "", "date": date, "dt_short": dt_short,
+            "eta": eta, "stage": None, "total": None, "stages": [], "error": None}
 
 
 def _humanize_event_code(code: str) -> str:
     """`OnTheWayToImportCustomsClearancePhantomStatus` → `On The Way To Import Customs Clearance`."""
-    import re as _re
+    if not code:
+        return "неизвестно"
     s = code
-    # Срезаем характерные суффиксы Ozon.
     for suf in ("PhantomStatus", "Status", "Event"):
         if s.endswith(suf):
             s = s[: -len(suf)]
             break
-    s = _re.sub(r"(?<!^)(?=[A-Z])", " ", s).strip()
+    s = re.sub(r"(?<!^)(?=[A-Z])", " ", s).strip()
     return s or code
 
 
