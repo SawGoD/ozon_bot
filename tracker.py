@@ -139,22 +139,34 @@ async def _safe_close(obj, label: str) -> None:
         log.warning("[tracker] %s close failed: %s", label, e)
 
 
-async def fetch_status(url: str, timeout_ms: int = 60_000) -> dict:
+FETCH_PHASES = 3  # browser launched / API received / DOM+screenshot done
+
+
+async def fetch_status(url: str, timeout_ms: int = 60_000, on_phase=None) -> dict:
     """Возвращает dict: {label, date, eta, error}. error=None при успехе.
 
     Жёсткие лимиты: общий таймаут FETCH_TIMEOUT_SEC, навигация/API — timeout_ms,
     чтение body — BODY_READ_TIMEOUT_MS. Браузер и контекст закрываются всегда.
+    on_phase(phase: int) — опциональный async callback, вызывается на ключевых шагах
+    (1=launched, 2=API received, 3=parsed). Полезно для прогресс-бара в UI.
     """
     try:
         return await asyncio.wait_for(
-            _fetch_status_inner(url, timeout_ms), timeout=FETCH_TIMEOUT_SEC
+            _fetch_status_inner(url, timeout_ms, on_phase), timeout=FETCH_TIMEOUT_SEC
         )
     except asyncio.TimeoutError:
         log.error("[tracker] hard timeout %ds for %s", FETCH_TIMEOUT_SEC, url)
         return _error_result(f"timeout {FETCH_TIMEOUT_SEC}s")
 
 
-async def _fetch_status_inner(url: str, timeout_ms: int) -> dict:
+async def _fetch_status_inner(url: str, timeout_ms: int, on_phase=None) -> dict:
+    async def _tick(phase: int) -> None:
+        if on_phase is None:
+            return
+        try:
+            await on_phase(phase)
+        except Exception:
+            log.debug("[tracker] on_phase(%d) failed", phase, exc_info=True)
     cookies = _load_cookies()
     if not cookies:
         log.warning("[tracker] no cookies — skipping browser launch for %s", url)
@@ -177,6 +189,7 @@ async def _fetch_status_inner(url: str, timeout_ms: int) -> dict:
         if proxy:
             launch_kwargs["proxy"] = proxy
         browser = await p.chromium.launch(**launch_kwargs)
+        await _tick(1)
         context = None
         try:
             context = await browser.new_context(
@@ -202,6 +215,7 @@ async def _fetch_status_inner(url: str, timeout_ms: int) -> dict:
                 ) as resp_info:
                     await page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
                 resp = await resp_info.value
+                await _tick(2)
                 log.info("[tracker] API response %s %s", resp.status, resp.url)
                 if resp.status != 200:
                     body_text = await _safe_body(page)
@@ -229,6 +243,7 @@ async def _fetch_status_inner(url: str, timeout_ms: int) -> dict:
                 log.info("[tracker] parsed: %s",
                          {k: v for k, v in result.items()
                           if k not in ("png", "png_short", "stages")})
+                await _tick(3)
                 return result
             except Exception as e:
                 log.warning("[tracker] API wait failed: %s — fallback to body parsing", e)
