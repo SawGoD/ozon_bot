@@ -299,13 +299,32 @@ async def _edit_all_pinned(app_bot, text: str, kb: InlineKeyboardMarkup, except_
                 log.warning("failed to edit pinned in chat %s msg %s: %s", chat_id, msg_id, err)
 
 
-async def check_all() -> list[tuple[str, str, dict]]:
+async def check_all(progress_cb=None) -> list[tuple[str, str, dict]]:
     global _last_success_at
     tracks = load_tracks()
     items = [(uid, e["url"]) for uid, e in tracks.items() if e.get("url")]
     if not items:
         return []
-    results = await asyncio.gather(*(_one(uid, url) for uid, url in items))
+    total = len(items)
+    done = 0
+    if progress_cb:
+        try:
+            await progress_cb(0, total)
+        except Exception:
+            log.exception("progress_cb start failed")
+
+    async def _wrap(uid: str, url: str):
+        nonlocal done
+        res = await _one(uid, url)
+        done += 1
+        if progress_cb:
+            try:
+                await progress_cb(done, total)
+            except Exception:
+                log.exception("progress_cb tick failed")
+        return res
+
+    results = await asyncio.gather(*(_wrap(uid, url) for uid, url in items))
     if results and all(r.get("error") is None for _, _, r in results):
         import time
         _last_success_at = time.time()
@@ -401,9 +420,20 @@ async def _detect_and_notify(app_bot, results: list[tuple[str, str, dict]]) -> N
                 log.exception("failed to send ETA notification")
 
 
-def _kb(loading: bool = False) -> InlineKeyboardMarkup:
+def _progress_bar(done: int, total: int, width: int = 8) -> str:
+    if total <= 0:
+        return ""
+    filled = max(0, min(width, round(width * done / total)))
+    return "▰" * filled + "▱" * (width - filled)
+
+
+def _kb(loading: bool = False, progress: tuple[int, int] | None = None) -> InlineKeyboardMarkup:
     if loading:
-        label = "⏳ Обновление..."
+        if progress:
+            done, total = progress
+            label = f"⏳ {_progress_bar(done, total)} {done}/{total}"
+        else:
+            label = "⏳ Обновление..."
     else:
         label = "🔄 Обновить"
         if _last_success_at:
@@ -652,7 +682,23 @@ async def on_refresh(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         # У других пользователей тоже подменим кнопку, чтобы они видели, что идёт обновление.
         await _set_loading_on_all_pinned(ctx.bot, except_msg=(chat, q.message.message_id))
 
-        results = await check_all()
+        async def _on_progress(done: int, total: int) -> None:
+            kb_p = _kb(loading=True, progress=(done, total))
+            try:
+                await q.edit_message_reply_markup(reply_markup=kb_p)
+            except Exception:
+                log.debug("progress edit on current msg failed", exc_info=True)
+            for chat_id, msg_id in load_pinned().items():
+                if (int(chat_id), msg_id) == (chat, q.message.message_id):
+                    continue
+                try:
+                    await ctx.bot.edit_message_reply_markup(
+                        chat_id=int(chat_id), message_id=msg_id, reply_markup=kb_p,
+                    )
+                except Exception:
+                    log.debug("progress edit on pinned %s failed", chat_id, exc_info=True)
+
+        results = await check_all(progress_cb=_on_progress)
         text, kb = _render(results)
         try:
             await q.edit_message_text(text, reply_markup=kb, parse_mode=ParseMode.MARKDOWN_V2)
