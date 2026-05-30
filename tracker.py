@@ -220,6 +220,8 @@ async def _fetch_status_inner(url: str, timeout_ms: int, on_phase=None) -> dict:
                 if resp.status != 200:
                     body_text = await _safe_body(page)
                     _dump_debug(url, await _safe_content(page), body_text)
+                    if resp.status == 404:
+                        return _error_result("заказ не найден")
                     return _error_result(f"HTTP {resp.status}")
                 api_data = await resp.json()
                 # Ждём рендера Nuxt, потом снимаем «компактный» скрин и раскрываем коллапсы.
