@@ -258,11 +258,13 @@ _sema = asyncio.Semaphore(CONCURRENCY)
 FETCH_HARD_TIMEOUT_SEC = int(os.environ.get("FETCH_HARD_TIMEOUT_SEC", "180"))
 
 
-async def _one(uid: str, url: str) -> tuple[str, str, dict]:
+async def _one(uid: str, url: str, on_phase=None) -> tuple[str, str, dict]:
     async with _sema:
         log.info("fetching status for %s", url)
         try:
-            res = await asyncio.wait_for(fetch_status(url), timeout=FETCH_HARD_TIMEOUT_SEC)
+            res = await asyncio.wait_for(
+                fetch_status(url, on_phase=on_phase), timeout=FETCH_HARD_TIMEOUT_SEC,
+            )
             log.info("got status for %s: %s", _track_id(url),
                      {k: v for k, v in res.items() if k not in ("png", "png_short")})
             return uid, url, res
@@ -300,28 +302,40 @@ async def _edit_all_pinned(app_bot, text: str, kb: InlineKeyboardMarkup, except_
 
 
 async def check_all(progress_cb=None) -> list[tuple[str, str, dict]]:
+    """progress_cb(done, total) — единицы: трек × фаза (3 фазы на трек)."""
     global _last_success_at
+    from tracker import FETCH_PHASES
     tracks = load_tracks()
     items = [(uid, e["url"]) for uid, e in tracks.items() if e.get("url")]
     if not items:
         return []
-    total = len(items)
-    done = 0
-    if progress_cb:
-        try:
-            await progress_cb(0, total)
-        except Exception:
-            log.exception("progress_cb start failed")
+    total_units = len(items) * FETCH_PHASES
+    done_units = 0
 
-    async def _wrap(uid: str, url: str):
-        nonlocal done
-        res = await _one(uid, url)
-        done += 1
+    async def _emit() -> None:
         if progress_cb:
             try:
-                await progress_cb(done, total)
+                await progress_cb(done_units, total_units)
             except Exception:
-                log.exception("progress_cb tick failed")
+                log.exception("progress_cb failed")
+
+    await _emit()
+
+    async def _wrap(uid: str, url: str):
+        nonlocal done_units
+        fired = 0
+
+        async def _phase(_p: int) -> None:
+            nonlocal done_units, fired
+            fired += 1
+            done_units += 1
+            await _emit()
+
+        res = await _one(uid, url, on_phase=_phase)
+        # Если трек упал на ранней фазе — добиваем до полного шага, чтобы бар достиг конца.
+        if fired < FETCH_PHASES:
+            done_units += FETCH_PHASES - fired
+            await _emit()
         return res
 
     results = await asyncio.gather(*(_wrap(uid, url) for uid, url in items))
@@ -427,11 +441,13 @@ def _progress_bar(done: int, total: int, width: int = 8) -> str:
     return "▰" * filled + "▱" * (width - filled)
 
 
-def _kb(loading: bool = False, progress: tuple[int, int] | None = None) -> InlineKeyboardMarkup:
+def _kb(loading: bool = False, progress: tuple[int, int] | None = None,
+        label_progress: tuple[int, int] | None = None) -> InlineKeyboardMarkup:
     if loading:
         if progress:
-            done, total = progress
-            label = f"⏳ {_progress_bar(done, total)} {done}/{total}"
+            bar = _progress_bar(*progress)
+            d, t = label_progress or progress
+            label = f"⏳ {bar} {d}/{t}"
         else:
             label = "⏳ Обновление..."
     else:
@@ -682,8 +698,13 @@ async def on_refresh(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         # У других пользователей тоже подменим кнопку, чтобы они видели, что идёт обновление.
         await _set_loading_on_all_pinned(ctx.bot, except_msg=(chat, q.message.message_id))
 
+        from tracker import FETCH_PHASES as _PHASES
+
         async def _on_progress(done: int, total: int) -> None:
-            kb_p = _kb(loading=True, progress=(done, total))
+            tracks_done = done // _PHASES
+            tracks_total = max(1, total // _PHASES)
+            kb_p = _kb(loading=True, progress=(done, total),
+                       label_progress=(tracks_done, tracks_total))
             try:
                 await q.edit_message_reply_markup(reply_markup=kb_p)
             except Exception:
