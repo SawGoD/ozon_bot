@@ -301,8 +301,10 @@ async def _edit_all_pinned(app_bot, text: str, kb: InlineKeyboardMarkup, except_
                 log.warning("failed to edit pinned in chat %s msg %s: %s", chat_id, msg_id, err)
 
 
-async def check_all(progress_cb=None) -> list[tuple[str, str, dict]]:
-    """progress_cb(done, total) — единицы: трек × фаза (3 фазы на трек)."""
+async def check_all(progress_cb=None, on_track_done=None) -> list[tuple[str, str, dict]]:
+    """progress_cb(done, total): фазные тики (3 на трек).
+    on_track_done(uid, url, r, done, total): зовётся после завершения каждого трека.
+    """
     global _last_success_at
     from tracker import FETCH_PHASES
     tracks = load_tracks()
@@ -336,6 +338,11 @@ async def check_all(progress_cb=None) -> list[tuple[str, str, dict]]:
         if fired < FETCH_PHASES:
             done_units += FETCH_PHASES - fired
             await _emit()
+        if on_track_done:
+            try:
+                await on_track_done(uid, url, res, done_units, total_units)
+            except Exception:
+                log.exception("on_track_done failed")
         return res
 
     results = await asyncio.gather(*(_wrap(uid, url) for uid, url in items))
@@ -719,7 +726,34 @@ async def on_refresh(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 except Exception:
                     log.debug("progress edit on pinned %s failed", chat_id, exc_info=True)
 
-        results = await check_all(progress_cb=_on_progress)
+        async def _on_track_done(uid: str, url: str, r: dict, done: int, total: int) -> None:
+            # Сохраняем результат и шлём алёрты сразу для этого трека (через _detect_and_notify).
+            await _detect_and_notify(ctx.bot, [(uid, url, r)])
+            # Перерисовываем пин из свежего кэша, не дожидаясь остальных треков.
+            text_now, _ = _render(_results_from_cache())
+            tracks_done = done // _PHASES
+            tracks_total = max(1, total // _PHASES)
+            kb_p = _kb(loading=True, progress=(done, total),
+                       label_progress=(tracks_done, tracks_total))
+            try:
+                await q.edit_message_text(text_now, reply_markup=kb_p,
+                                          parse_mode=ParseMode.MARKDOWN_V2)
+            except Exception as e:
+                if "Message is not modified" not in str(e):
+                    log.debug("track-done edit failed: %s", e)
+            for chat_id, msg_id in load_pinned().items():
+                if (int(chat_id), msg_id) == (chat, q.message.message_id):
+                    continue
+                try:
+                    await ctx.bot.edit_message_text(
+                        text_now, chat_id=int(chat_id), message_id=msg_id,
+                        reply_markup=kb_p, parse_mode=ParseMode.MARKDOWN_V2,
+                    )
+                except Exception as e:
+                    if "Message is not modified" not in str(e):
+                        log.debug("track-done pinned %s edit failed: %s", chat_id, e)
+
+        results = await check_all(progress_cb=_on_progress, on_track_done=_on_track_done)
         text, kb = _render(results)
         try:
             await q.edit_message_text(text, reply_markup=kb, parse_mode=ParseMode.MARKDOWN_V2)
